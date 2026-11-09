@@ -1,7 +1,9 @@
 //! Everything that talks to Windows. All `unsafe` code of the program lives in
 //! this module tree; the rest of the crate is safe Rust.
 
+mod gdip;
 pub mod http;
+pub mod popup;
 pub mod shell;
 
 use std::ffi::{c_void, OsStr, OsString};
@@ -73,9 +75,27 @@ pub enum Instance {
     Running,
 }
 
-/// Take the named mutex that marks the one running tray instance.
-pub fn single_instance() -> Instance {
-    let name = wide("Local\\bingwall-tray");
+const INSTANCE_NAME: &str = "Local\\bingwall-tray";
+
+/// The name of the mutex that marks the one running tray instance. It is the
+/// same for everybody, unless the data directory is a custom one
+/// (`BINGWALL_DIR`): then a short hash of that directory is added, so a tray
+/// that works on another directory is another instance.
+pub fn instance_name(custom_dir: Option<&Path>) -> String {
+    let Some(dir) = custom_dir else { return INSTANCE_NAME.to_string() };
+    // Windows paths are not case sensitive, and `a\b` and `a\b\` are one folder.
+    let dir = dir.to_string_lossy().replace('/', "\\").to_lowercase();
+    // FNV-1a, 64 bits: a few lines, no dependency, and the value never changes.
+    let hash = dir
+        .trim_end_matches('\\')
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    format!("{INSTANCE_NAME}-{hash:016x}")
+}
+
+/// Take the named mutex that marks the one running tray instance (see `instance_name`).
+pub fn single_instance(name: &str) -> Instance {
+    let name = wide(name);
     // SAFETY: `name` is NUL-terminated and outlives the call; a null
     // security-attributes pointer is allowed.
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
@@ -192,6 +212,30 @@ mod tests {
         assert_eq!(w.last(), Some(&0));
         assert_eq!(String::from_utf16(&w[..w.len() - 1]).unwrap(), "C:\\Users\\Jos\u{e9} \u{65e5}\u{672c}\\a.jpg");
         assert_eq!(wide(""), vec![0]);
+    }
+
+    #[test]
+    fn instance_name_is_fixed_without_a_custom_directory() {
+        assert_eq!(instance_name(None), "Local\\bingwall-tray");
+    }
+
+    #[test]
+    fn instance_name_depends_on_the_custom_directory() {
+        let a = instance_name(Some(Path::new("C:\\data\\one")));
+        let b = instance_name(Some(Path::new("C:\\data\\two")));
+        assert_ne!(a, b);
+        assert_ne!(a, instance_name(None));
+        // The default name and a short suffix of 16 hex digits.
+        let suffix = a.strip_prefix("Local\\bingwall-tray-").unwrap();
+        assert_eq!(suffix.len(), 16);
+        assert!(suffix.bytes().all(|c| c.is_ascii_hexdigit()));
+        // The same folder written in another way gives the same name.
+        assert_eq!(a, instance_name(Some(Path::new("c:\\DATA\\One"))));
+        assert_eq!(a, instance_name(Some(Path::new("C:\\data\\one\\"))));
+        assert_eq!(a, instance_name(Some(Path::new("C:/data/one"))));
+        // The name never changes between runs or versions (it is part of the contract
+        // between two bingwall.exe that start at different times).
+        assert_eq!(instance_name(Some(Path::new("C:\\data\\one"))), "Local\\bingwall-tray-93b9b01117b2954c");
     }
 
     #[test]

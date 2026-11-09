@@ -5,12 +5,13 @@
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows_sys::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -22,12 +23,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::wide;
+use crate::preview::Rect;
 
 /// What the user or a timer asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Check Bing for new images (timer, resume from sleep, start-up).
     Sync,
+    /// Open the preview popup, or close it if it is open (left-click, menu).
+    Preview,
     Next,
     Previous,
     Today,
@@ -47,6 +51,7 @@ const ID_NEXT: usize = 1;
 const ID_PREVIOUS: usize = 2;
 const ID_TODAY: usize = 3;
 const ID_QUIT: usize = 4;
+const ID_PREVIEW: usize = 5;
 
 // The window procedure is a plain function, so its state is kept in statics.
 static HANDLER: OnceLock<fn(Action)> = OnceLock::new();
@@ -133,6 +138,31 @@ pub fn run(initial_tip: &str, handler: fn(Action)) -> i32 {
     }
 }
 
+/// Where to put a window that belongs to the tray icon, in screen pixels: the
+/// icon's own rectangle, or the cursor if Windows cannot say where the icon is.
+pub fn anchor() -> Rect {
+    let hwnd = WINDOW.load(Ordering::Acquire) as HWND;
+    // SAFETY: `id` is fully set and `rc` is a valid out-pointer; the call only
+    // reads `id`. An all-zero GUID means "no GUID": the icon is found by window and id.
+    let icon = unsafe {
+        let id = NOTIFYICONIDENTIFIER {
+            cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: hwnd,
+            uID: ICON_ID,
+            guidItem: std::mem::zeroed(),
+        };
+        let mut rc: RECT = std::mem::zeroed();
+        let found = !hwnd.is_null() && Shell_NotifyIconGetRect(&id, &mut rc) >= 0;
+        (found && rc.right > rc.left && rc.bottom > rc.top).then_some(Rect::new(rc.left, rc.top, rc.right, rc.bottom))
+    };
+    icon.unwrap_or_else(|| {
+        let mut pt = POINT { x: 0, y: 0 };
+        // SAFETY: `pt` is a valid out-pointer.
+        unsafe { GetCursorPos(&mut pt) };
+        Rect::new(pt.x, pt.y, pt.x + 1, pt.y + 1)
+    })
+}
+
 /// Add, change or remove the notification-area icon.
 fn notify(hwnd: HWND, op: u32, flags: u32) {
     // SAFETY: an all-zero NOTIFYICONDATAW is a valid value (integers and null
@@ -170,7 +200,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_TRAY => {
             match (lparam as u32) & 0xFFFF {
-                WM_LBUTTONUP => dispatch(Action::Next),
+                WM_LBUTTONUP => dispatch(Action::Preview),
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
                 _ => {}
             }
@@ -226,7 +256,7 @@ fn show_menu(hwnd: HWND) {
         if menu.is_null() {
             return;
         }
-        for (id, text) in [(ID_NEXT, "Next"), (ID_PREVIOUS, "Previous"), (ID_TODAY, "Today")] {
+        for (id, text) in [(ID_PREVIEW, "Preview"), (ID_NEXT, "Next"), (ID_PREVIOUS, "Previous"), (ID_TODAY, "Today")] {
             AppendMenuW(menu, MF_STRING, id, wide(text).as_ptr());
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
@@ -251,6 +281,7 @@ fn show_menu(hwnd: HWND) {
     };
     super::trim_working_set();
     match chosen {
+        ID_PREVIEW => dispatch(Action::Preview),
         ID_NEXT => dispatch(Action::Next),
         ID_PREVIOUS => dispatch(Action::Previous),
         ID_TODAY => dispatch(Action::Today),

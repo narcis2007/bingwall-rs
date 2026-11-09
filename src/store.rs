@@ -59,6 +59,22 @@ pub fn file_name(date: &str, hsh: &str) -> String {
     format!("{}.jpg", file_stem(date, hsh))
 }
 
+/// The row reached from row `pos` after `delta` steps in a list of `len` rows,
+/// wrapping around at both ends. Without a position, a forward step gives the
+/// first row and a backward step the last. `None` only for an empty list.
+/// `State::step` and the preview popup both walk the list with this function.
+pub fn wrap_index(len: usize, pos: Option<usize>, delta: isize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let n = len as isize;
+    Some(match pos {
+        Some(p) => (p as isize + delta).rem_euclid(n) as usize,
+        None if delta >= 0 => 0,
+        None => len - 1,
+    })
+}
+
 /// `20261109` gives `2026-11-09`.
 pub fn pretty_date(date: &str) -> String {
     match (date.get(0..4), date.get(4..6), date.get(6..8)) {
@@ -122,17 +138,12 @@ impl State {
     /// image), `-1` the previous row (a newer one). It wraps around at both ends.
     /// Without a current image, `+` gives the first row and `-` the last.
     pub fn step(&self, delta: isize) -> Option<&Entry> {
-        let len = self.entries.len() as isize;
-        if len == 0 {
-            return None;
-        }
-        let pos = self.current.as_deref().and_then(|id| self.entries.iter().position(|e| e.id() == id));
-        let target = match pos {
-            Some(p) => (p as isize + delta).rem_euclid(len),
-            None if delta >= 0 => 0,
-            None => len - 1,
-        };
-        self.entries.get(target as usize)
+        wrap_index(self.entries.len(), self.current_position(), delta).and_then(|i| self.entries.get(i))
+    }
+
+    /// The row of the current image, if it is in the list.
+    pub fn current_position(&self) -> Option<usize> {
+        self.current.as_deref().and_then(|id| self.entries.iter().position(|e| e.id() == id))
     }
 
     /// True when `date` is newer than anything applied automatically before.
@@ -376,6 +387,30 @@ mod tests {
         assert_eq!(st.step(-1).unwrap().date, "20261101", "no current: previous is the last row");
         st.current = Some("gone".into());
         assert_eq!(st.step(1).unwrap().date, "20261103", "unknown current behaves like none");
+    }
+
+    #[test]
+    fn wrap_index_walks_a_list_in_a_circle() {
+        assert_eq!(wrap_index(0, None, 1), None);
+        assert_eq!(wrap_index(0, Some(0), -1), None);
+        assert_eq!(wrap_index(3, Some(0), 1), Some(1));
+        assert_eq!(wrap_index(3, Some(2), 1), Some(0), "forward from the last row wraps to the first");
+        assert_eq!(wrap_index(3, Some(0), -1), Some(2), "backward from the first row wraps to the last");
+        assert_eq!(wrap_index(3, Some(1), -1), Some(0));
+        assert_eq!(wrap_index(1, Some(0), 1), Some(0));
+        assert_eq!(wrap_index(3, Some(1), 7), Some(2), "more than a full circle still lands on a row");
+        assert_eq!(wrap_index(3, None, 1), Some(0));
+        assert_eq!(wrap_index(3, None, -1), Some(2));
+    }
+
+    #[test]
+    fn current_position_is_the_row_of_the_current_image() {
+        let mut st = state_with(3); // order: 03, 02, 01
+        assert_eq!(st.current_position(), None);
+        st.current = Some("20261102_hash0002".into());
+        assert_eq!(st.current_position(), Some(1));
+        st.current = Some("gone".into());
+        assert_eq!(st.current_position(), None);
     }
 
     #[test]

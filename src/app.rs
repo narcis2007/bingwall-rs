@@ -28,21 +28,23 @@ const STALE_PART: Duration = Duration::from_secs(10 * 60);
 
 pub struct Ctx {
     pub dir: PathBuf,
+    /// True when `dir` came from `BINGWALL_DIR` and not from the default place.
+    pub custom_dir: bool,
     pub market: String,
 }
 
 impl Ctx {
     /// The data directory is `BINGWALL_DIR` if set, else `%LOCALAPPDATA%\bingwall`.
     pub fn new(market: String) -> Result<Ctx, String> {
-        let dir = match std::env::var_os("BINGWALL_DIR").filter(|d| !d.is_empty()) {
-            Some(d) => PathBuf::from(d),
+        let (dir, custom_dir) = match std::env::var_os("BINGWALL_DIR").filter(|d| !d.is_empty()) {
+            Some(d) => (PathBuf::from(d), true),
             None => {
                 let base = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-                PathBuf::from(base).join("bingwall")
+                (PathBuf::from(base).join("bingwall"), false)
             }
         };
         let dir = std::path::absolute(&dir).map_err(|e| format!("bad data directory: {e}"))?;
-        Ok(Ctx { dir, market })
+        Ok(Ctx { dir, custom_dir, market })
     }
 
     fn images_dir(&self) -> PathBuf {
@@ -53,7 +55,7 @@ impl Ctx {
         self.dir.join(store::STATE_FILE)
     }
 
-    fn image_path(&self, e: &Entry) -> PathBuf {
+    pub fn image_path(&self, e: &Entry) -> PathBuf {
         self.images_dir().join(e.file_name())
     }
 }
@@ -96,6 +98,19 @@ pub fn step(ctx: &Ctx, delta: isize) -> Result<Entry, String> {
         let id = st.step(delta).map(Entry::id).ok_or(NOTHING_CACHED)?;
         apply(ctx, st, &id)
     })?
+}
+
+/// Make the cached image `id` the wallpaper (the "Set" button of the preview).
+pub fn set(ctx: &Ctx, id: &str) -> Result<Entry, String> {
+    update(ctx, |st| apply(ctx, st, id))?
+}
+
+/// A snapshot of the cached images, newest first, and the row of the current
+/// image (the first row if there is none). Empty when nothing is cached.
+pub fn preview_list(ctx: &Ctx) -> (Vec<Entry>, usize) {
+    let st = load(ctx);
+    let start = st.current_position().unwrap_or(0);
+    (st.entries().to_vec(), start)
 }
 
 /// Make the newest cached image the wallpaper. Does not use the network.

@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 use std::thread;
 
 use crate::app::{self, Ctx};
+use crate::preview::Item;
+use crate::win::popup::{self, Request};
 use crate::win::shell::{self, Action};
 use crate::win::{self, Instance};
 
@@ -15,9 +17,11 @@ const THREAD_STACK: usize = 512 * 1024;
 static CTX: OnceLock<Ctx> = OnceLock::new();
 static SYNCING: AtomicBool = AtomicBool::new(false);
 
-/// Run the tray until the user picks Quit. Returns at once if another tray runs.
+/// Run the tray until the user picks Quit. Returns at once if another tray runs
+/// on the same data directory.
 pub fn run(ctx: Ctx) -> i32 {
-    let _guard = match win::single_instance() {
+    let name = win::instance_name(ctx.custom_dir.then_some(ctx.dir.as_path()));
+    let _guard = match win::single_instance(&name) {
         Instance::Running => return 0,
         Instance::First(g) => g,
     };
@@ -28,6 +32,7 @@ pub fn run(ctx: Ctx) -> i32 {
 fn on_action(action: Action) {
     match action {
         Action::Sync => start_sync(),
+        Action::Preview => popup::toggle(preview_request),
         Action::Next => quick(|c| drop(app::step(c, 1))),
         Action::Previous => quick(|c| drop(app::step(c, -1))),
         Action::Today => {
@@ -36,6 +41,27 @@ fn on_action(action: Action) {
             start_sync();
         }
     }
+}
+
+/// What the popup shows: a snapshot of the cache now. Nothing to show if it is empty.
+fn preview_request() -> Option<Request> {
+    let ctx = CTX.get()?;
+    let (entries, start) = app::preview_list(ctx);
+    if entries.is_empty() {
+        return None;
+    }
+    let items = entries.iter().map(|e| Item::new(e, ctx.image_path(e))).collect();
+    Some(Request { items, start, anchor: shell::anchor(), on_set: set_wallpaper })
+}
+
+/// The "Set as wallpaper" button of the popup. It runs on its own thread, like the menu commands.
+fn set_wallpaper(id: &str) {
+    let Some(ctx) = CTX.get() else { return };
+    let id = id.to_string();
+    spawn(move || {
+        drop(app::set(ctx, &id));
+        refresh_tooltip(ctx);
+    });
 }
 
 fn spawn(job: impl FnOnce() + Send + 'static) -> bool {

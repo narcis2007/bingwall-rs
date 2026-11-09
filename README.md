@@ -10,7 +10,7 @@ bingwall is an independent project. It is not affiliated with, endorsed by or sp
 
 - One Rust program, one dependency (`windows-sys`, plain Win32 declarations).
 - Web requests use WinHTTP, which is part of Windows. There is no TLS library, no browser engine and no async runtime in the program.
-- The tray process sleeps between hourly checks. It keeps nothing in memory but its window and the icon.
+- The tray process sleeps between hourly checks. It keeps nothing in memory but its window and the icon. (The preview popup is the one exception, and only while it is open. See below.)
 
 ## Install
 
@@ -33,14 +33,34 @@ Run `bingwall.exe` with no arguments. A small icon appears in the notification a
 - On start, and then every hour (and shortly after the PC wakes from sleep), it asks Bing for the latest images and downloads the ones it does not have.
 - When a new day's image arrives, it becomes your wallpaper. If there is nothing new, your wallpaper stays as it is, so a restart does not undo a picture you chose.
 - Hover the icon to see the title of the current image.
-- Left-click the icon: **Next**.
+- Left-click the icon: the **preview popup** (below). Click the icon again to close it.
 - Right-click for the menu:
+  - **Preview**: the same popup.
   - **Next**: the next older cached image. After the oldest, it wraps to the newest.
   - **Previous**: the next newer cached image. Before the newest, it wraps to the oldest.
   - **Today**: the newest image.
   - **Quit**.
 
+Next, Previous and Today change the wallpaper at once.
+
 If the network is down, bingwall keeps your wallpaper and tries again at the next check.
+
+### Preview popup
+
+A small dark window above the tray icon shows one cached picture with its title, its date and its place in the list, for example `3 / 15`. Browse the pictures first, then choose one. Browsing never changes your wallpaper. Only **Set as wallpaper** does. If you close the popup in any other way, nothing has changed.
+
+| Do this | To get this |
+| --- | --- |
+| Left arrow key, or the left button | The previous (newer) picture. After the newest, it wraps to the oldest. |
+| Right arrow key, or the right button | The next (older) picture. After the oldest, it wraps to the newest. |
+| Enter, the **Set as wallpaper** button, or a double-click on the picture | Make this picture the wallpaper, and close the popup. |
+| Esc, a click anywhere else, or a click on the tray icon | Close the popup. |
+
+The popup starts on your current picture. It shows the pictures that were cached when it opened; a check for new images that finishes meanwhile shows up the next time you open it.
+
+A 4K picture takes about a seventh of a second to decode, so the popup shows `Loading...` for that moment after you move to a picture. The decoding runs on its own thread, so the popup never freezes.
+
+The popup uses Windows' own GDI+ to decode and scale the JPEG. GDI+ is loaded when the popup opens and unloaded when it closes. While the tray is idle, GDI+ is not in the process. This has a price while the popup is open: decoding one 4K picture needs about 35 MB of memory for a moment (sometimes more, up to about 80 MB), which is freed at once. After the popup closes, the private memory of the tray is back to within about half a megabyte of what it was. One small system library that GDI+ loads (`WindowsCodecs.dll`, shared with other programs) stays mapped until the tray exits.
 
 ## Command line
 
@@ -64,7 +84,7 @@ A command-line run and a running tray share the same files. You can use both.
 
 ## Where things are stored
 
-`%LOCALAPPDATA%\bingwall\` (set the environment variable `BINGWALL_DIR` to use another folder):
+`%LOCALAPPDATA%\bingwall\` (set the environment variable `BINGWALL_DIR` to use another folder; a tray that uses another folder counts as another instance, so you can run one tray for each folder):
 
 - `images\<YYYYMMDD>_<first 8 characters of Bing's hsh>.jpg`: the pictures.
 - `state.txt`: a small text index with the date, hash and title of each picture, the current picture, and the date of the last automatic change.
